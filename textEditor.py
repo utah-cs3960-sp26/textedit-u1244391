@@ -8,10 +8,14 @@ from enum import Enum
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QWidget, QVBoxLayout, 
     QHBoxLayout, QDialog, QLabel, QLineEdit, QCheckBox, QPushButton,
-    QMenuBar, QToolBar, QStatusBar, QFileDialog, QMessageBox
+    QMenuBar, QStatusBar, QFileDialog, QMessageBox, QPlainTextEdit, QMenu,
+    QTreeView, QDockWidget, QInputDialog, QHeaderView, QAbstractItemView,
+    QTabWidget, QSplitter, QTabBar
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QAction, QFont, QUndoStack
+from PyQt6.QtCore import QDir, QFileSystemWatcher, QModelIndex
+from PyQt6.QtGui import QFileSystemModel
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QSize
+from PyQt6.QtGui import QKeySequence, QAction, QFont, QUndoStack, QColor, QPainter, QTextFormat, QTextCursor
 
 
 # ============================================================================
@@ -31,7 +35,8 @@ class SettingsManager:
             "encoding": "utf-8",
             "window_width": 1000,
             "window_height": 700,
-            "recent_files": []
+            "recent_files": [],
+            "dark_mode": False
         }
         self.settings = self.load()
     
@@ -156,31 +161,170 @@ class ClipboardManager:
 
 
 # ============================================================================
-# Custom Text Editor Widget
+# Custom Text Editor Widget with Line Numbers
 # ============================================================================
 
-class TextEditor(QTextEdit):
-    """Custom QTextEdit widget with enhanced features."""
+class LineNumberArea(QWidget):
+    """Widget for displaying line numbers."""
+    
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+    
+    def sizeHint(self):
+        return QSize(self.editor.line_number_area_width(), 0)
+    
+    def paintEvent(self, event):
+        self.editor.line_number_area_paint_event(event)
+
+
+class TextEditor(QPlainTextEdit):
+    """Custom QPlainTextEdit widget with line numbers and enhanced features."""
     
     def __init__(self, tab_width: int = 4, auto_indent: bool = True):
         super().__init__()
         self.tab_width = tab_width
         self.auto_indent = auto_indent
+        self.dark_mode = False
         
         # Setup font and properties
         font = QFont("Courier New", 12)
         font.setFixedPitch(True)
         self.setFont(font)
         
-        self.setAcceptRichText(False)
-        
         # Set tab width in pixels
         self.setTabStopDistance(self.tab_width * 8)
+        
+        # Create line number area
+        self.line_number_area = LineNumberArea(self)
+        
+        # Connect signals for line number updates
+        self.blockCountChanged.connect(self.update_line_number_area_width)
+        self.updateRequest.connect(self.update_line_number_area)
+        self.cursorPositionChanged.connect(self.highlight_current_line)
+        
+        self.update_line_number_area_width(0)
+        self.highlight_current_line()
+        self.apply_theme()
+    
+    def line_number_area_width(self):
+        """Calculate the width needed for line numbers."""
+        digits = 1
+        max_num = max(1, self.blockCount())
+        while max_num >= 10:
+            max_num //= 10
+            digits += 1
+        space = 10 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+    
+    def update_line_number_area_width(self, _):
+        """Update the viewport margins to accommodate line numbers."""
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+    
+    def update_line_number_area(self, rect, dy):
+        """Scroll or update the line number area."""
+        if dy:
+            self.line_number_area.scroll(0, dy)
+        else:
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
+        
+        if rect.contains(self.viewport().rect()):
+            self.update_line_number_area_width(0)
+    
+    def resizeEvent(self, event):
+        """Handle resize to adjust line number area."""
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+    
+    def line_number_area_paint_event(self, event):
+        """Paint the line numbers."""
+        painter = QPainter(self.line_number_area)
+        
+        if self.dark_mode:
+            painter.fillRect(event.rect(), QColor("#2d2d2d"))
+            number_color = QColor("#888888")
+            current_line_color = QColor("#ffffff")
+        else:
+            painter.fillRect(event.rect(), QColor("#f0f0f0"))
+            number_color = QColor("#888888")
+            current_line_color = QColor("#000000")
+        
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        
+        current_block_number = self.textCursor().blockNumber()
+        
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                if block_number == current_block_number:
+                    painter.setPen(current_line_color)
+                    font = painter.font()
+                    font.setBold(True)
+                    painter.setFont(font)
+                else:
+                    painter.setPen(number_color)
+                    font = painter.font()
+                    font.setBold(False)
+                    painter.setFont(font)
+                painter.drawText(0, top, self.line_number_area.width() - 5, 
+                               self.fontMetrics().height(), Qt.AlignmentFlag.AlignRight, number)
+            
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+    
+    def highlight_current_line(self):
+        """Highlight the current line."""
+        extra_selections = []
+        
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            
+            if self.dark_mode:
+                line_color = QColor("#3d3d3d")
+            else:
+                line_color = QColor("#e6f3ff")
+            
+            selection.format.setBackground(line_color)
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extra_selections.append(selection)
+        
+        self.setExtraSelections(extra_selections)
+    
+    def set_dark_mode(self, enabled: bool):
+        """Set dark or light mode."""
+        self.dark_mode = enabled
+        self.apply_theme()
+        self.highlight_current_line()
+        self.line_number_area.update()
+    
+    def apply_theme(self):
+        """Apply the current theme colors."""
+        if self.dark_mode:
+            self.setStyleSheet("""
+                QPlainTextEdit {
+                    background-color: #1e1e1e;
+                    color: #d4d4d4;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QPlainTextEdit {
+                    background-color: #ffffff;
+                    color: #000000;
+                }
+            """)
     
     def keyPressEvent(self, event):
         """Handle custom key press events."""
         if event.key() == Qt.Key.Key_Tab:
-            # Insert spaces instead of tab
             self.insertPlainText(" " * self.tab_width)
         elif event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
             if self.auto_indent:
@@ -196,12 +340,491 @@ class TextEditor(QTextEdit):
         block = cursor.block()
         text = block.text()
         
-        # Count leading spaces
         indent = len(text) - len(text.lstrip())
         
-        # Insert newline and matching indent
         cursor.insertText("\n" + " " * indent)
         self.setTextCursor(cursor)
+
+
+# ============================================================================
+# Multi-File Tab Support
+# ============================================================================
+
+class EditorTab:
+    """Represents a single file tab with its editor and metadata."""
+    
+    def __init__(self, editor: TextEditor, file_path: Optional[Path] = None):
+        self.editor = editor
+        self.file_path = file_path
+        self.is_modified = False
+        self.encoding = "utf-8"
+    
+    @property
+    def name(self) -> str:
+        if self.file_path:
+            return self.file_path.name
+        return "Untitled"
+    
+    @property
+    def display_name(self) -> str:
+        return f"{self.name} *" if self.is_modified else self.name
+
+
+class EditorTabWidget(QTabWidget):
+    """Tab widget for managing multiple editor tabs."""
+    
+    tab_changed = pyqtSignal(object)  # Emits EditorTab
+    all_tabs_closed = pyqtSignal()
+    tab_dropped = pyqtSignal(object, object)  # source_tab_widget, tab
+    
+    def __init__(self, settings_manager, parent=None):
+        super().__init__(parent)
+        self.settings_manager = settings_manager
+        self.tabs: list[EditorTab] = []
+        self.dark_mode = False
+        
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.setAcceptDrops(True)
+        
+        # Enable drag from tab bar
+        self.tabBar().setAcceptDrops(True)
+        self.tabBar().setChangeCurrentOnDrag(True)
+        
+        self.tabCloseRequested.connect(self._close_tab)
+        self.currentChanged.connect(self._on_tab_changed)
+        
+        self.new_tab()
+    
+    def new_tab(self, file_path: Optional[Path] = None, content: str = "") -> EditorTab:
+        """Create a new editor tab."""
+        editor = TextEditor(
+            tab_width=self.settings_manager.get("tab_width", 4),
+            auto_indent=self.settings_manager.get("auto_indent", True)
+        )
+        editor.set_dark_mode(self.dark_mode)
+        
+        if content:
+            editor.setPlainText(content)
+        
+        tab = EditorTab(editor, file_path)
+        self.tabs.append(tab)
+        
+        index = self.addTab(editor, tab.name)
+        self.setCurrentIndex(index)
+        
+        editor.textChanged.connect(lambda: self._on_text_changed(tab))
+        
+        return tab
+    
+    def _on_text_changed(self, tab: EditorTab):
+        """Handle text changes in a tab."""
+        if not tab.is_modified:
+            tab.is_modified = True
+            self._update_tab_title(tab)
+    
+    def _update_tab_title(self, tab: EditorTab):
+        """Update the tab title to reflect modified state."""
+        index = self.tabs.index(tab)
+        self.setTabText(index, tab.display_name)
+    
+    def _on_tab_changed(self, index: int):
+        """Handle tab change."""
+        if 0 <= index < len(self.tabs):
+            self.tab_changed.emit(self.tabs[index])
+    
+    def _close_tab(self, index: int):
+        """Close a tab, prompting to save if modified."""
+        if index < 0 or index >= len(self.tabs):
+            return
+        
+        tab = self.tabs[index]
+        
+        if tab.is_modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                f"'{tab.name}' has unsaved changes. Do you want to save before closing?",
+                QMessageBox.StandardButton.Save | 
+                QMessageBox.StandardButton.Discard | 
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Save:
+                if not self._save_tab(tab):
+                    return
+        
+        self.removeTab(index)
+        self.tabs.pop(index)
+        
+        if len(self.tabs) == 0:
+            self.all_tabs_closed.emit()
+    
+    def _save_tab(self, tab: EditorTab) -> bool:
+        """Save a tab's content. Returns True if saved successfully."""
+        if not tab.file_path:
+            file_path, _ = QFileDialog.getSaveFileName(self)
+            if not file_path:
+                return False
+            tab.file_path = Path(file_path)
+        
+        try:
+            with open(tab.file_path, 'w', encoding=tab.encoding) as f:
+                f.write(tab.editor.toPlainText())
+            tab.is_modified = False
+            self._update_tab_title(tab)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+            return False
+    
+    def current_tab(self) -> Optional[EditorTab]:
+        """Get the currently active tab."""
+        index = self.currentIndex()
+        if 0 <= index < len(self.tabs):
+            return self.tabs[index]
+        return None
+    
+    def open_file(self, file_path: Path, content: str, encoding: str = "utf-8") -> EditorTab:
+        """Open a file in a new tab or switch to existing tab."""
+        for i, tab in enumerate(self.tabs):
+            if tab.file_path == file_path:
+                self.setCurrentIndex(i)
+                return tab
+        
+        tab = self.new_tab(file_path, content)
+        tab.encoding = encoding
+        tab.is_modified = False
+        self._update_tab_title(tab)
+        return tab
+    
+    def save_current(self) -> bool:
+        """Save the current tab."""
+        tab = self.current_tab()
+        if tab:
+            return self._save_tab(tab)
+        return False
+    
+    def save_current_as(self) -> bool:
+        """Save the current tab with a new name."""
+        tab = self.current_tab()
+        if not tab:
+            return False
+        
+        file_path, _ = QFileDialog.getSaveFileName(self)
+        if not file_path:
+            return False
+        
+        tab.file_path = Path(file_path)
+        return self._save_tab(tab)
+    
+    def receive_tab(self, tab: EditorTab):
+        """Receive a tab from another tab widget."""
+        tab.editor.set_dark_mode(self.dark_mode)
+        self.tabs.append(tab)
+        index = self.addTab(tab.editor, tab.display_name)
+        self.setCurrentIndex(index)
+        tab.editor.textChanged.connect(lambda: self._on_text_changed(tab))
+    
+    def remove_tab_without_close(self, index: int) -> Optional[EditorTab]:
+        """Remove a tab without closing it (for transfer)."""
+        if index < 0 or index >= len(self.tabs):
+            return None
+        
+        tab = self.tabs.pop(index)
+        self.removeTab(index)
+        
+        if len(self.tabs) == 0:
+            self.all_tabs_closed.emit()
+        
+        return tab
+    
+    def set_dark_mode(self, enabled: bool):
+        """Apply dark mode to all editors."""
+        self.dark_mode = enabled
+        for tab in self.tabs:
+            tab.editor.set_dark_mode(enabled)
+        
+        if enabled:
+            self.setStyleSheet("""
+                QTabWidget::pane { border: none; background-color: #1e1e1e; }
+                QTabBar::tab { 
+                    background-color: #2d2d2d; 
+                    color: #d4d4d4; 
+                    padding: 6px 12px;
+                    border: none;
+                    border-right: 1px solid #3d3d3d;
+                }
+                QTabBar::tab:selected { background-color: #1e1e1e; }
+                QTabBar::tab:hover { background-color: #3d3d3d; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QTabWidget::pane { border: none; }
+                QTabBar::tab { 
+                    background-color: #e0e0e0; 
+                    padding: 6px 12px;
+                    border: none;
+                    border-right: 1px solid #cccccc;
+                }
+                QTabBar::tab:selected { background-color: #ffffff; }
+                QTabBar::tab:hover { background-color: #f0f0f0; }
+            """)
+
+
+class SplitPaneWidget(QWidget):
+    """Wrapper widget for EditorTabWidget with a close button."""
+    
+    close_requested = pyqtSignal(object)
+    
+    def __init__(self, tab_widget: EditorTabWidget, parent=None):
+        super().__init__(parent)
+        self.tab_widget = tab_widget
+        self.dark_mode = False
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Header with close button
+        self.header = QWidget()
+        self.header.setFixedHeight(20)
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(0, 0, 2, 0)
+        header_layout.setSpacing(0)
+        header_layout.addStretch()
+        
+        self.close_btn = QPushButton("×")
+        self.close_btn.setFixedSize(18, 18)
+        self.close_btn.setFlat(True)
+        self.close_btn.clicked.connect(lambda: self.close_requested.emit(self))
+        self.close_btn.setToolTip("Close split")
+        header_layout.addWidget(self.close_btn)
+        
+        layout.addWidget(self.header)
+        layout.addWidget(tab_widget)
+        
+        self.apply_theme(False)
+    
+    def apply_theme(self, dark_mode: bool):
+        self.dark_mode = dark_mode
+        if dark_mode:
+            self.header.setStyleSheet("background-color: #2d2d2d;")
+            self.close_btn.setStyleSheet("""
+                QPushButton { color: #888888; background: transparent; border: none; font-size: 14px; }
+                QPushButton:hover { color: #ffffff; background-color: #c42b1c; }
+            """)
+        else:
+            self.header.setStyleSheet("background-color: #e0e0e0;")
+            self.close_btn.setStyleSheet("""
+                QPushButton { color: #666666; background: transparent; border: none; font-size: 14px; }
+                QPushButton:hover { color: #ffffff; background-color: #c42b1c; }
+            """)
+
+
+class EditorPane(QWidget):
+    """A pane that can contain tabs and be split."""
+    
+    file_opened = pyqtSignal(str)
+    
+    def __init__(self, settings_manager, parent=None):
+        super().__init__(parent)
+        self.settings_manager = settings_manager
+        self.dark_mode = False
+        self.active_tab_widget: Optional[EditorTabWidget] = None
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.layout.addWidget(self.splitter)
+        
+        self.tab_widgets: list[EditorTabWidget] = []
+        self.split_panes: list[SplitPaneWidget] = []
+        self._add_tab_widget()
+    
+    def _add_tab_widget(self) -> EditorTabWidget:
+        """Add a new tab widget to the splitter."""
+        tab_widget = EditorTabWidget(self.settings_manager)
+        tab_widget.set_dark_mode(self.dark_mode)
+        tab_widget.all_tabs_closed.connect(lambda: self._remove_tab_widget(tab_widget))
+        tab_widget.currentChanged.connect(lambda: self._set_active_tab_widget(tab_widget))
+        
+        # Track when user clicks in this tab widget
+        tab_widget.tabBar().installEventFilter(self)
+        
+        self.tab_widgets.append(tab_widget)
+        
+        # Wrap in split pane with close button
+        pane = SplitPaneWidget(tab_widget)
+        pane.apply_theme(self.dark_mode)
+        pane.close_requested.connect(self._on_pane_close_requested)
+        self.split_panes.append(pane)
+        self.splitter.addWidget(pane)
+        
+        # Hide close button if only one pane
+        self._update_close_buttons()
+        
+        # Set as active
+        self.active_tab_widget = tab_widget
+        
+        return tab_widget
+    
+    def eventFilter(self, obj, event):
+        """Track mouse clicks on tab bars to set active widget."""
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.MouseButtonPress:
+            # Find which tab widget this tab bar belongs to
+            for tw in self.tab_widgets:
+                if tw.tabBar() == obj:
+                    self.active_tab_widget = tw
+                    break
+        return super().eventFilter(obj, event)
+    
+    def _set_active_tab_widget(self, tw: EditorTabWidget):
+        """Set the active tab widget when user interacts with it."""
+        self.active_tab_widget = tw
+    
+    def transfer_tab(self, from_widget: EditorTabWidget, to_widget: EditorTabWidget, tab_index: int):
+        """Transfer a tab from one widget to another."""
+        if from_widget == to_widget:
+            return
+        
+        tab = from_widget.remove_tab_without_close(tab_index)
+        if tab:
+            to_widget.receive_tab(tab)
+    
+    def _update_close_buttons(self):
+        """Show/hide close buttons based on number of panes."""
+        show = len(self.split_panes) > 1
+        for pane in self.split_panes:
+            pane.header.setVisible(show)
+    
+    def _on_pane_close_requested(self, pane: SplitPaneWidget):
+        """Handle close button click on a pane."""
+        if len(self.split_panes) <= 1:
+            return
+        
+        # Check for unsaved changes
+        for tab in pane.tab_widget.tabs:
+            if tab.is_modified:
+                reply = QMessageBox.question(
+                    self, "Unsaved Changes",
+                    f"'{tab.name}' has unsaved changes. Close anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+        
+        self.tab_widgets.remove(pane.tab_widget)
+        self.split_panes.remove(pane)
+        pane.deleteLater()
+        self._update_close_buttons()
+    
+    def _remove_tab_widget(self, tab_widget: EditorTabWidget):
+        """Remove a tab widget when all its tabs are closed."""
+        if len(self.tab_widgets) <= 1:
+            # Keep at least one tab open in the last pane
+            tab_widget.new_tab()
+            return
+        
+        # Find and remove the pane
+        for pane in self.split_panes:
+            if pane.tab_widget == tab_widget:
+                self.tab_widgets.remove(tab_widget)
+                self.split_panes.remove(pane)
+                pane.deleteLater()
+                break
+        self._update_close_buttons()
+    
+    def current_tab_widget(self) -> Optional[EditorTabWidget]:
+        """Get the currently focused tab widget."""
+        # First check if we have a tracked active widget
+        if self.active_tab_widget and self.active_tab_widget in self.tab_widgets:
+            return self.active_tab_widget
+        
+        # Fall back to focus-based detection
+        focus = QApplication.focusWidget()
+        for tw in self.tab_widgets:
+            if tw.isAncestorOf(focus) or tw == focus:
+                self.active_tab_widget = tw
+                return tw
+        
+        # Default to first tab widget
+        if self.tab_widgets:
+            self.active_tab_widget = self.tab_widgets[0]
+            return self.active_tab_widget
+        return None
+    
+    def current_tab(self) -> Optional[EditorTab]:
+        """Get the current tab from the focused tab widget."""
+        tw = self.current_tab_widget()
+        return tw.current_tab() if tw else None
+    
+    def current_editor(self) -> Optional[TextEditor]:
+        """Get the current editor."""
+        tab = self.current_tab()
+        return tab.editor if tab else None
+    
+    def split_horizontal(self):
+        """Split the view horizontally."""
+        self.splitter.setOrientation(Qt.Orientation.Horizontal)
+        self._add_tab_widget()
+    
+    def split_vertical(self):
+        """Split the view vertically."""
+        self.splitter.setOrientation(Qt.Orientation.Vertical)
+        self._add_tab_widget()
+    
+    def close_split(self):
+        """Close the current split pane."""
+        if len(self.split_panes) <= 1:
+            return
+        
+        tw = self.current_tab_widget()
+        if tw:
+            # Find the pane for this tab widget
+            for pane in self.split_panes:
+                if pane.tab_widget == tw:
+                    self._on_pane_close_requested(pane)
+                    break
+    
+    def new_file(self):
+        """Create a new file in the current tab widget."""
+        tw = self.current_tab_widget()
+        if tw:
+            tw.new_tab()
+    
+    def open_file(self, file_path: Path, content: str, encoding: str = "utf-8"):
+        """Open a file in the current tab widget."""
+        tw = self.current_tab_widget()
+        if tw:
+            tw.open_file(file_path, content, encoding)
+    
+    def save_current(self) -> bool:
+        """Save the current file."""
+        tw = self.current_tab_widget()
+        return tw.save_current() if tw else False
+    
+    def save_current_as(self) -> bool:
+        """Save the current file with a new name."""
+        tw = self.current_tab_widget()
+        return tw.save_current_as() if tw else False
+    
+    def set_dark_mode(self, enabled: bool):
+        """Apply dark mode to all tab widgets."""
+        self.dark_mode = enabled
+        for tw in self.tab_widgets:
+            tw.set_dark_mode(enabled)
+        for pane in self.split_panes:
+            pane.apply_theme(enabled)
+        
+        if enabled:
+            self.splitter.setStyleSheet("QSplitter::handle { background-color: #3d3d3d; }")
+        else:
+            self.splitter.setStyleSheet("QSplitter::handle { background-color: #cccccc; }")
 
 
 # ============================================================================
@@ -232,6 +855,10 @@ class MenuManager:
         
         self.save_as_action = file_menu.addAction("Save &As")
         self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        
+        file_menu.addSeparator()
+        self.open_project_action = file_menu.addAction("Open Pro&ject...")
+        self.close_project_action = file_menu.addAction("Close Projec&t")
         
         file_menu.addSeparator()
         self.exit_action = file_menu.addAction("E&xit")
@@ -270,34 +897,415 @@ class MenuManager:
         self.find_replace_action = view_menu.addAction("Find & &Replace")
         self.find_replace_action.setShortcut(QKeySequence.StandardKey.Replace)
         
+        view_menu.addSeparator()
+        self.split_horizontal_action = view_menu.addAction("Split &Horizontal")
+        self.split_vertical_action = view_menu.addAction("Split &Vertical")
+        self.close_split_action = view_menu.addAction("Close Spli&t")
+        
+        view_menu.addSeparator()
+        self.dark_mode_action = view_menu.addAction("&Dark Mode")
+        self.dark_mode_action.setCheckable(True)
+        
         # Help menu
         help_menu = menu_bar.addMenu("&Help")
         self.about_action = help_menu.addAction("&About")
 
 
-class ToolBarManager:
-    """Manages toolbar with quick-access buttons."""
+class MenuTabBar(QWidget):
+    """Tab bar with File, Edit, View menus embedded in the app window."""
     
     def __init__(self, main_window: QMainWindow):
+        super().__init__(main_window)
         self.main_window = main_window
-        self.toolbar = self.main_window.addToolBar("Main Toolbar")
-        self.create_toolbar()
-    
-    def create_toolbar(self):
-        """Create toolbar buttons."""
-        # Get actions from menu manager (assuming it's already created)
-        menu_manager = self.main_window.menu_manager
+        self.dark_mode = False
+        self.setFixedHeight(32)
         
-        self.toolbar.addAction(menu_manager.new_action)
-        self.toolbar.addAction(menu_manager.open_action)
-        self.toolbar.addAction(menu_manager.save_action)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(menu_manager.cut_action)
-        self.toolbar.addAction(menu_manager.copy_action)
-        self.toolbar.addAction(menu_manager.paste_action)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(menu_manager.undo_action)
-        self.toolbar.addAction(menu_manager.redo_action)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 2, 5, 2)
+        layout.setSpacing(0)
+        
+        self.file_btn = QPushButton("File")
+        self.edit_btn = QPushButton("Edit")
+        self.view_btn = QPushButton("View")
+        
+        for btn in [self.file_btn, self.edit_btn, self.view_btn]:
+            btn.setFlat(True)
+            btn.setFixedHeight(26)
+            btn.setFixedWidth(60)
+            layout.addWidget(btn)
+        
+        layout.addStretch()
+        
+        self.file_btn.clicked.connect(self._show_file_menu)
+        self.edit_btn.clicked.connect(self._show_edit_menu)
+        self.view_btn.clicked.connect(self._show_view_menu)
+        
+        self.apply_theme(False)
+    
+    def _show_file_menu(self):
+        menu = QMenu(self)
+        mm = self.main_window.menu_manager
+        menu.addAction(mm.new_action)
+        menu.addAction(mm.open_action)
+        menu.addAction(mm.save_action)
+        menu.addAction(mm.save_as_action)
+        menu.addSeparator()
+        menu.addAction(mm.open_project_action)
+        menu.addAction(mm.close_project_action)
+        menu.addSeparator()
+        menu.addAction(mm.exit_action)
+        self._apply_menu_theme(menu)
+        menu.exec(self.file_btn.mapToGlobal(self.file_btn.rect().bottomLeft()))
+    
+    def _show_edit_menu(self):
+        menu = QMenu(self)
+        mm = self.main_window.menu_manager
+        menu.addAction(mm.undo_action)
+        menu.addAction(mm.redo_action)
+        menu.addSeparator()
+        menu.addAction(mm.cut_action)
+        menu.addAction(mm.copy_action)
+        menu.addAction(mm.paste_action)
+        menu.addSeparator()
+        menu.addAction(mm.select_all_action)
+        menu.addAction(mm.select_line_action)
+        menu.addAction(mm.select_word_action)
+        self._apply_menu_theme(menu)
+        menu.exec(self.edit_btn.mapToGlobal(self.edit_btn.rect().bottomLeft()))
+    
+    def _show_view_menu(self):
+        menu = QMenu(self)
+        mm = self.main_window.menu_manager
+        menu.addAction(mm.find_action)
+        menu.addAction(mm.find_replace_action)
+        menu.addSeparator()
+        menu.addAction(mm.split_horizontal_action)
+        menu.addAction(mm.split_vertical_action)
+        menu.addAction(mm.close_split_action)
+        menu.addSeparator()
+        menu.addAction(mm.dark_mode_action)
+        self._apply_menu_theme(menu)
+        menu.exec(self.view_btn.mapToGlobal(self.view_btn.rect().bottomLeft()))
+    
+    def _apply_menu_theme(self, menu):
+        if self.dark_mode:
+            menu.setStyleSheet("""
+                QMenu { background-color: #2d2d2d; color: #ffffff; }
+                QMenu::item:selected { background-color: #3d3d3d; }
+            """)
+    
+    def apply_theme(self, dark_mode: bool):
+        self.dark_mode = dark_mode
+        if dark_mode:
+            self.setStyleSheet("""
+                QWidget { background-color: #2d2d2d; }
+                QPushButton { 
+                    color: #ffffff; 
+                    background-color: #2d2d2d; 
+                    border: none; 
+                    padding: 5px 15px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #3d3d3d; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QWidget { background-color: #f0f0f0; }
+                QPushButton { 
+                    color: #000000; 
+                    background-color: #f0f0f0; 
+                    border: none; 
+                    padding: 5px 15px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #e0e0e0; }
+            """)
+
+
+class FileTreeExplorer(QDockWidget):
+    """File system tree explorer with collapsible folders."""
+    
+    file_opened = pyqtSignal(str)
+    
+    def __init__(self, main_window: QMainWindow):
+        super().__init__("Explorer", main_window)
+        self.main_window = main_window
+        self.dark_mode = False
+        self.root_path = None
+        
+        self.container = QWidget()
+        self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setContentsMargins(0, 0, 0, 0)
+        self.container_layout.setSpacing(0)
+        
+        self.placeholder = QWidget()
+        placeholder_layout = QVBoxLayout(self.placeholder)
+        placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.no_project_label = QLabel("No project open")
+        self.no_project_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_layout.addWidget(self.no_project_label)
+        
+        self.open_project_btn = QPushButton("Open Project")
+        self.open_project_btn.clicked.connect(self.open_project)
+        self.open_project_btn.setMaximumWidth(150)
+        placeholder_layout.addWidget(self.open_project_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        self.model = QFileSystemModel()
+        self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
+        
+        self.tree = QTreeView()
+        self.tree.setModel(self.model)
+        self.tree.setHeaderHidden(True)
+        self.tree.hideColumn(1)
+        self.tree.hideColumn(2)
+        self.tree.hideColumn(3)
+        self.tree.setAnimated(True)
+        self.tree.setIndentation(20)
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.doubleClicked.connect(self._on_double_click)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.setVisible(False)
+        
+        self.container_layout.addWidget(self.placeholder)
+        self.container_layout.addWidget(self.tree)
+        
+        self.setWidget(self.container)
+        self.setMinimumWidth(200)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | 
+                        QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        
+        self.apply_theme(False)
+    
+    def open_project(self):
+        """Open a folder as a project."""
+        folder = QFileDialog.getExistingDirectory(self, "Open Project Folder")
+        if folder:
+            self.set_root_path(folder)
+    
+    def _on_double_click(self, index: QModelIndex):
+        """Handle double-click to open files."""
+        file_path = self.model.filePath(index)
+        if self.model.isDir(index):
+            return
+        self.file_opened.emit(file_path)
+    
+    def _show_context_menu(self, position):
+        """Show right-click context menu."""
+        index = self.tree.indexAt(position)
+        menu = QMenu(self)
+        
+        new_file_action = menu.addAction("New File")
+        new_folder_action = menu.addAction("New Folder")
+        menu.addSeparator()
+        
+        rename_action = None
+        delete_action = None
+        if index.isValid():
+            rename_action = menu.addAction("Rename")
+            delete_action = menu.addAction("Delete")
+            menu.addSeparator()
+        
+        refresh_action = menu.addAction("Refresh")
+        menu.addSeparator()
+        open_project_action = menu.addAction("Open Project...")
+        close_project_action = menu.addAction("Close Project")
+        
+        if self.dark_mode:
+            menu.setStyleSheet("""
+                QMenu { background-color: #2d2d2d; color: #ffffff; }
+                QMenu::item:selected { background-color: #3d3d3d; }
+            """)
+        
+        action = menu.exec(self.tree.viewport().mapToGlobal(position))
+        
+        if action == new_file_action:
+            self._create_new_file(index)
+        elif action == new_folder_action:
+            self._create_new_folder(index)
+        elif action == rename_action and rename_action:
+            self._rename_item(index)
+        elif action == delete_action and delete_action:
+            self._delete_item(index)
+        elif action == refresh_action:
+            self._refresh()
+        elif action == open_project_action:
+            self.open_project()
+        elif action == close_project_action:
+            self.close_project()
+    
+    def _get_directory_path(self, index: QModelIndex) -> str:
+        """Get directory path from index (or parent if file)."""
+        if not index.isValid():
+            return self.root_path
+        path = self.model.filePath(index)
+        if self.model.isDir(index):
+            return path
+        return str(Path(path).parent)
+    
+    def _create_new_file(self, index: QModelIndex):
+        """Create a new file."""
+        dir_path = self._get_directory_path(index)
+        name, ok = QInputDialog.getText(self, "New File", "File name:")
+        if ok and name:
+            file_path = Path(dir_path) / name
+            try:
+                file_path.touch()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to create file: {e}")
+    
+    def _create_new_folder(self, index: QModelIndex):
+        """Create a new folder."""
+        dir_path = self._get_directory_path(index)
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:")
+        if ok and name:
+            folder_path = Path(dir_path) / name
+            try:
+                folder_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to create folder: {e}")
+    
+    def _rename_item(self, index: QModelIndex):
+        """Rename a file or folder."""
+        if not index.isValid():
+            return
+        old_path = Path(self.model.filePath(index))
+        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=old_path.name)
+        if ok and new_name and new_name != old_path.name:
+            new_path = old_path.parent / new_name
+            try:
+                old_path.rename(new_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to rename: {e}")
+    
+    def _delete_item(self, index: QModelIndex):
+        """Delete a file or folder."""
+        if not index.isValid():
+            return
+        path = Path(self.model.filePath(index))
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Are you sure you want to delete '{path.name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                if path.is_dir():
+                    import shutil
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete: {e}")
+    
+    def _refresh(self):
+        """Refresh the file tree."""
+        self.model.setRootPath("")
+        self.model.setRootPath(self.root_path)
+    
+    def highlight_file(self, file_path: str):
+        """Highlight and scroll to a file in the tree."""
+        if not file_path:
+            return
+        index = self.model.index(file_path)
+        if index.isValid():
+            self.tree.setCurrentIndex(index)
+            self.tree.scrollTo(index)
+    
+    def set_root_path(self, path: str):
+        """Change the root directory."""
+        self.root_path = path
+        self.model.setRootPath(path)
+        self.tree.setRootIndex(self.model.index(path))
+        self.placeholder.setVisible(False)
+        self.tree.setVisible(True)
+        self.setWindowTitle(f"Explorer - {Path(path).name}")
+    
+    def close_project(self):
+        """Close the current project."""
+        self.root_path = None
+        self.tree.setVisible(False)
+        self.placeholder.setVisible(True)
+        self.setWindowTitle("Explorer")
+    
+    def apply_theme(self, dark_mode: bool):
+        """Apply dark or light theme."""
+        self.dark_mode = dark_mode
+        if dark_mode:
+            self.setStyleSheet("""
+                QDockWidget {
+                    background-color: #2d2d2d;
+                    color: #ffffff;
+                }
+                QDockWidget::title {
+                    background-color: #2d2d2d;
+                    color: #ffffff;
+                    padding: 5px;
+                }
+                QWidget {
+                    background-color: #2d2d2d;
+                    color: #d4d4d4;
+                }
+                QLabel {
+                    color: #d4d4d4;
+                }
+                QPushButton {
+                    background-color: #3d3d3d;
+                    color: #ffffff;
+                    border: 1px solid #555555;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #4d4d4d;
+                }
+                QTreeView {
+                    background-color: #1e1e1e;
+                    color: #d4d4d4;
+                    border: none;
+                }
+                QTreeView::item:selected {
+                    background-color: #3d3d3d;
+                }
+                QTreeView::item:hover {
+                    background-color: #353535;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDockWidget {
+                    background-color: #f5f5f5;
+                }
+                QDockWidget::title {
+                    background-color: #e0e0e0;
+                    padding: 5px;
+                }
+                QWidget {
+                    background-color: #f5f5f5;
+                }
+                QPushButton {
+                    background-color: #e0e0e0;
+                    border: 1px solid #cccccc;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+                QTreeView {
+                    background-color: #ffffff;
+                    border: none;
+                }
+                QTreeView::item:selected {
+                    background-color: #cce8ff;
+                }
+                QTreeView::item:hover {
+                    background-color: #e5f3ff;
+                }
+            """)
 
 
 class StatusBarManager:
@@ -340,10 +1348,13 @@ class FindReplaceDialog(QDialog):
     
     def __init__(self, parent: QMainWindow):
         super().__init__(parent)
-        self.text_editor = parent.text_editor
-        self.search_engine = parent.search_engine
+        self.main_window = parent
         self.setWindowTitle("Find & Replace")
         self.setup_ui()
+    
+    def get_current_editor(self) -> Optional[TextEditor]:
+        """Get the current text editor from the editor pane."""
+        return self.main_window.editor_pane.current_editor()
     
     def setup_ui(self):
         """Setup dialog UI."""
@@ -391,6 +1402,10 @@ class FindReplaceDialog(QDialog):
     
     def find_all(self):
         """Find all occurrences."""
+        editor = self.get_current_editor()
+        if not editor:
+            return
+        
         pattern = self.find_input.text()
         if not pattern:
             return
@@ -399,9 +1414,24 @@ class FindReplaceDialog(QDialog):
         whole_word = self.whole_word.isChecked()
         use_regex = self.regex.isChecked()
         
-        results = self.search_engine.find_all(
-            pattern, case_sensitive, whole_word, use_regex
-        )
+        text = editor.toPlainText()
+        results = []
+        
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            
+            if use_regex:
+                regex = re.compile(pattern, flags)
+            else:
+                escaped = re.escape(pattern)
+                if whole_word:
+                    escaped = r'\b' + escaped + r'\b'
+                regex = re.compile(escaped, flags)
+            
+            for match in regex.finditer(text):
+                results.append(match.span())
+        except re.error:
+            pass
         
         QMessageBox.information(
             self, "Search Results",
@@ -410,6 +1440,10 @@ class FindReplaceDialog(QDialog):
     
     def replace_all(self):
         """Replace all occurrences."""
+        editor = self.get_current_editor()
+        if not editor:
+            return
+        
         pattern = self.find_input.text()
         replacement = self.replace_input.text()
         
@@ -420,9 +1454,25 @@ class FindReplaceDialog(QDialog):
         whole_word = self.whole_word.isChecked()
         use_regex = self.regex.isChecked()
         
-        count = self.search_engine.replace_all(
-            pattern, replacement, case_sensitive, whole_word, use_regex
-        )
+        text = editor.toPlainText()
+        count = 0
+        
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            
+            if use_regex:
+                regex = re.compile(pattern, flags)
+            else:
+                escaped = re.escape(pattern)
+                if whole_word:
+                    escaped = r'\b' + escaped + r'\b'
+                regex = re.compile(escaped, flags)
+            
+            new_text, count = regex.subn(replacement, text)
+            if count > 0:
+                editor.setPlainText(new_text)
+        except re.error:
+            pass
         
         QMessageBox.information(
             self, "Replace Results",
@@ -498,30 +1548,37 @@ class MainWindow(QMainWindow):
         self.settings_manager = SettingsManager()
         self.file_manager = FileManager()
         
-        # Create text editor
-        self.text_editor = TextEditor(
-            tab_width=self.settings_manager.get("tab_width", 4),
-            auto_indent=self.settings_manager.get("auto_indent", True)
-        )
-        self.setCentralWidget(self.text_editor)
+        # Create editor pane (with tabs and split support)
+        self.editor_pane = EditorPane(self.settings_manager)
         
         # Initialize UI managers
         self.menu_manager = MenuManager(self)
-        self.toolbar_manager = ToolBarManager(self)
-        self.status_bar_manager = StatusBarManager(self, self.text_editor)
+        self.menu_tab_bar = MenuTabBar(self)
         
-        # Initialize text operation managers
-        self.selection_manager = SelectionManager(self.text_editor)
-        self.clipboard_manager = ClipboardManager(self.text_editor)
-        self.search_engine = SearchEngine(self.text_editor)
+        # Create file tree explorer
+        self.file_explorer = FileTreeExplorer(self)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.file_explorer)
+        self.file_explorer.file_opened.connect(self._open_file_from_explorer)
         
-        # Setup undo/redo
-        self.undo_stack = QUndoStack()
-        self.text_editor.setUndoRedoEnabled(True)
+        # Create central widget with menu tab bar and editor pane
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.menu_tab_bar)
+        central_layout.addWidget(self.editor_pane)
+        self.setCentralWidget(central_widget)
         
-        # Track file modification
-        self.is_modified = False
-        self.text_editor.textChanged.connect(self._on_text_changed)
+        # Status bar (will update based on current editor)
+        self.status_bar = self.statusBar()
+        self.position_label = QLabel("Line 1, Column 1")
+        self.status_bar.addWidget(self.position_label)
+        self.encoding_label = QLabel("UTF-8")
+        self.status_bar.addPermanentWidget(self.encoding_label)
+        
+        # Connect to tab changes to update status bar
+        for tw in self.editor_pane.tab_widgets:
+            tw.tab_changed.connect(self._on_tab_changed)
         
         # Connect menu actions
         self._connect_actions()
@@ -532,6 +1589,37 @@ class MainWindow(QMainWindow):
             self.settings_manager.get("window_width", 1000),
             self.settings_manager.get("window_height", 700)
         )
+        
+        # Apply saved dark mode setting
+        dark_mode = self.settings_manager.get("dark_mode", False)
+        if dark_mode:
+            self.menu_manager.dark_mode_action.setChecked(True)
+            self.toggle_dark_mode(True)
+    
+    def _on_tab_changed(self, tab: EditorTab):
+        """Update UI when tab changes."""
+        self._update_title()
+        self._connect_current_editor()
+    
+    def _connect_current_editor(self):
+        """Connect signals from current editor."""
+        editor = self.editor_pane.current_editor()
+        if editor:
+            try:
+                editor.cursorPositionChanged.disconnect(self._update_position)
+            except:
+                pass
+            editor.cursorPositionChanged.connect(self._update_position)
+            self._update_position()
+    
+    def _update_position(self):
+        """Update cursor position in status bar."""
+        editor = self.editor_pane.current_editor()
+        if editor:
+            cursor = editor.textCursor()
+            line = cursor.blockNumber() + 1
+            column = cursor.positionInBlock() + 1
+            self.position_label.setText(f"Line {line}, Column {column}")
     
     def _connect_actions(self):
         """Connect menu actions to functions."""
@@ -540,48 +1628,115 @@ class MainWindow(QMainWindow):
         self.menu_manager.open_action.triggered.connect(self.open_file)
         self.menu_manager.save_action.triggered.connect(self.save_file)
         self.menu_manager.save_as_action.triggered.connect(self.save_as_file)
+        self.menu_manager.open_project_action.triggered.connect(self.file_explorer.open_project)
+        self.menu_manager.close_project_action.triggered.connect(self.file_explorer.close_project)
         self.menu_manager.exit_action.triggered.connect(self.close)
         
         # Edit menu
-        self.menu_manager.undo_action.triggered.connect(self.text_editor.undo)
-        self.menu_manager.redo_action.triggered.connect(self.text_editor.redo)
-        self.menu_manager.cut_action.triggered.connect(self.clipboard_manager.cut)
-        self.menu_manager.copy_action.triggered.connect(self.clipboard_manager.copy)
-        self.menu_manager.paste_action.triggered.connect(self.clipboard_manager.paste)
-        self.menu_manager.select_all_action.triggered.connect(self.selection_manager.select_all)
-        self.menu_manager.select_line_action.triggered.connect(self.selection_manager.select_line)
-        self.menu_manager.select_word_action.triggered.connect(self.selection_manager.select_word)
+        self.menu_manager.undo_action.triggered.connect(self._undo)
+        self.menu_manager.redo_action.triggered.connect(self._redo)
+        self.menu_manager.cut_action.triggered.connect(self._cut)
+        self.menu_manager.copy_action.triggered.connect(self._copy)
+        self.menu_manager.paste_action.triggered.connect(self._paste)
+        self.menu_manager.select_all_action.triggered.connect(self._select_all)
+        self.menu_manager.select_line_action.triggered.connect(self._select_line)
+        self.menu_manager.select_word_action.triggered.connect(self._select_word)
         
         # View menu
         self.menu_manager.find_action.triggered.connect(self.show_find_dialog)
         self.menu_manager.find_replace_action.triggered.connect(self.show_find_replace_dialog)
+        self.menu_manager.split_horizontal_action.triggered.connect(self.editor_pane.split_horizontal)
+        self.menu_manager.split_vertical_action.triggered.connect(self.editor_pane.split_vertical)
+        self.menu_manager.close_split_action.triggered.connect(self.editor_pane.close_split)
+        self.menu_manager.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+    
+    def _undo(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.undo()
+    
+    def _redo(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.redo()
+    
+    def _cut(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.cut()
+    
+    def _copy(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.copy()
+    
+    def _paste(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.paste()
+    
+    def _select_all(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            editor.selectAll()
+    
+    def _select_line(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            cursor = editor.textCursor()
+            cursor.select(cursor.SelectionType.LineUnderCursor)
+            editor.setTextCursor(cursor)
+    
+    def _select_word(self):
+        editor = self.editor_pane.current_editor()
+        if editor:
+            cursor = editor.textCursor()
+            cursor.select(cursor.SelectionType.WordUnderCursor)
+            editor.setTextCursor(cursor)
+    
+    def toggle_dark_mode(self, checked: bool):
+        """Toggle between dark and light mode."""
+        self.editor_pane.set_dark_mode(checked)
+        self.settings_manager.set("dark_mode", checked)
+        self._apply_window_theme(checked)
+    
+    def _apply_window_theme(self, dark_mode: bool):
+        """Apply theme to window elements."""
+        self.menu_tab_bar.apply_theme(dark_mode)
+        self.file_explorer.apply_theme(dark_mode)
+        if dark_mode:
+            self.setStyleSheet("""
+                QMainWindow { background-color: #2d2d2d; }
+                QMenuBar { background-color: #2d2d2d; color: #d4d4d4; }
+                QMenuBar::item:selected { background-color: #3d3d3d; }
+                QMenu { background-color: #2d2d2d; color: #d4d4d4; }
+                QMenu::item:selected { background-color: #3d3d3d; }
+                QStatusBar { background-color: #2d2d2d; color: #d4d4d4; }
+            """)
+        else:
+            self.setStyleSheet("")
     
     def new_file(self):
-        """Create a new file."""
-        if self.is_modified and not self._confirm_discard():
-            return
-        
-        self.text_editor.clear()
-        self.file_manager.current_file = None
-        self.is_modified = False
-        self.setWindowTitle("Text Editor - Untitled")
+        """Create a new file in a new tab."""
+        self.editor_pane.new_file()
+        self._update_title()
     
     def open_file(self):
-        """Open a file."""
-        if self.is_modified and not self._confirm_discard():
-            return
-        
+        """Open a file in a new tab."""
         file_path, _ = QFileDialog.getOpenFileName(self)
         if not file_path:
             return
         
+        self._open_file_path(file_path)
+    
+    def _open_file_path(self, file_path: str):
+        """Open a file by path in a new tab."""
         content, success = self.file_manager.read_file(Path(file_path))
         
         if success:
-            self.text_editor.setPlainText(content)
-            self.is_modified = False
+            self.editor_pane.open_file(Path(file_path), content, self.file_manager.encoding)
             self._update_title()
-            self.status_bar_manager.set_encoding(self.file_manager.encoding)
+            self.encoding_label.setText(self.file_manager.encoding.upper())
             
             # Add to recent files
             recent = self.settings_manager.get("recent_files", [])
@@ -589,36 +1744,23 @@ class MainWindow(QMainWindow):
                 recent.remove(file_path)
             recent.insert(0, file_path)
             self.settings_manager.set("recent_files", recent[:10])
+            self.file_explorer.highlight_file(file_path)
         else:
             QMessageBox.critical(self, "Error", content)
     
+    def _open_file_from_explorer(self, file_path: str):
+        """Open a file from the file explorer."""
+        self._open_file_path(file_path)
+    
     def save_file(self):
         """Save current file."""
-        if not self.file_manager.current_file:
-            self.save_as_file()
-            return
-        
-        content = self.text_editor.toPlainText()
-        if self.file_manager.write_file(self.file_manager.current_file, content):
-            self.is_modified = False
+        if self.editor_pane.save_current():
             self._update_title()
-            QMessageBox.information(self, "Success", "File saved successfully.")
-        else:
-            QMessageBox.critical(self, "Error", "Failed to save file.")
     
     def save_as_file(self):
         """Save file with a new name."""
-        file_path, _ = QFileDialog.getSaveFileName(self)
-        if not file_path:
-            return
-        
-        content = self.text_editor.toPlainText()
-        if self.file_manager.write_file(Path(file_path), content):
-            self.is_modified = False
+        if self.editor_pane.save_current_as():
             self._update_title()
-            QMessageBox.information(self, "Success", "File saved successfully.")
-        else:
-            QMessageBox.critical(self, "Error", "Failed to save file.")
     
     def show_find_dialog(self):
         """Show find dialog."""
@@ -631,32 +1773,28 @@ class MainWindow(QMainWindow):
         dialog = FindReplaceDialog(self)
         dialog.exec()
     
-    def _on_text_changed(self):
-        """Handle text change."""
-        if not self.is_modified:
-            self.is_modified = True
-            self._update_title()
-    
     def _update_title(self):
-        """Update window title based on file state."""
-        file_name = self.file_manager.get_file_name()
-        modified = " *" if self.is_modified else ""
-        self.setWindowTitle(f"Text Editor - {file_name}{modified}")
-    
-    def _confirm_discard(self) -> bool:
-        """Ask user to confirm discarding changes."""
-        reply = QMessageBox.question(
-            self, "Unsaved Changes",
-            "You have unsaved changes. Do you want to discard them?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        return reply == QMessageBox.StandardButton.Yes
+        """Update window title based on current tab."""
+        tab = self.editor_pane.current_tab()
+        if tab:
+            self.setWindowTitle(f"Text Editor - {tab.display_name}")
+        else:
+            self.setWindowTitle("Text Editor")
     
     def closeEvent(self, event):
         """Handle window close."""
-        if self.is_modified and not self._confirm_discard():
-            event.ignore()
-            return
+        # Check all tabs for unsaved changes
+        for tw in self.editor_pane.tab_widgets:
+            for tab in tw.tabs:
+                if tab.is_modified:
+                    reply = QMessageBox.question(
+                        self, "Unsaved Changes",
+                        f"'{tab.name}' has unsaved changes. Exit anyway?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        event.ignore()
+                        return
         
         # Save settings
         self.settings_manager.set("window_width", self.width())
