@@ -164,6 +164,381 @@ class ClipboardManager:
 # Custom Text Editor Widget with Line Numbers
 # ============================================================================
 
+class AutoIndentManager:
+    """Manages automatic indentation based on context."""
+    
+    INDENT_INCREASE_CHARS = ['{', '[', '(', ':']
+    INDENT_DECREASE_CHARS = ['}', ']', ')']
+    
+    def __init__(self, editor, tab_width: int = 4):
+        self.editor = editor
+        self.tab_width = tab_width
+    
+    def get_line_indent(self, text: str) -> int:
+        """Get the indentation level of a line (number of spaces)."""
+        return len(text) - len(text.lstrip())
+    
+    def detect_indent_char(self, text: str) -> str:
+        """Detect whether the document uses tabs or spaces."""
+        for line in text.split('\n'):
+            if line.startswith('\t'):
+                return '\t'
+            elif line.startswith(' '):
+                return ' '
+        return ' '
+    
+    def calculate_indent(self, cursor) -> str:
+        """Calculate the appropriate indentation for a new line."""
+        block = cursor.block()
+        text = block.text()
+        current_indent = self.get_line_indent(text)
+        
+        text_before_cursor = text[:cursor.positionInBlock()]
+        stripped = text_before_cursor.rstrip()
+        
+        if stripped and stripped[-1] in self.INDENT_INCREASE_CHARS:
+            current_indent += self.tab_width
+        
+        return ' ' * current_indent
+    
+    def should_decrease_indent(self, char: str, cursor) -> bool:
+        """Check if we should decrease indent when typing a closing bracket."""
+        if char not in self.INDENT_DECREASE_CHARS:
+            return False
+        
+        block = cursor.block()
+        text_before = block.text()[:cursor.positionInBlock()]
+        return text_before.strip() == ''
+    
+    def get_decreased_indent(self, cursor) -> int:
+        """Get the decreased indent level."""
+        block = cursor.block()
+        current_indent = self.get_line_indent(block.text())
+        return max(0, current_indent - self.tab_width)
+
+
+class BracketMatchManager:
+    """Manages bracket matching and auto-closing."""
+    
+    BRACKETS = {
+        '(': ')',
+        '[': ']',
+        '{': '}'
+    }
+    CLOSING_BRACKETS = {v: k for k, v in BRACKETS.items()}
+    
+    def __init__(self, editor):
+        self.editor = editor
+        self.matched_selections = []
+    
+    def get_matching_bracket(self, char: str) -> Optional[str]:
+        """Get the closing bracket for an opening bracket."""
+        return self.BRACKETS.get(char)
+    
+    def is_opening_bracket(self, char: str) -> bool:
+        return char in self.BRACKETS
+    
+    def is_closing_bracket(self, char: str) -> bool:
+        return char in self.CLOSING_BRACKETS
+    
+    def find_matching_bracket(self, cursor) -> Optional[int]:
+        """Find the position of the matching bracket."""
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos >= len(text):
+            return None
+        
+        char = text[pos] if pos < len(text) else ''
+        
+        if pos > 0 and text[pos - 1] in self.BRACKETS:
+            char = text[pos - 1]
+            pos = pos - 1
+            search_forward = True
+            target = self.BRACKETS[char]
+        elif pos > 0 and text[pos - 1] in self.CLOSING_BRACKETS:
+            char = text[pos - 1]
+            pos = pos - 1
+            search_forward = False
+            target = self.CLOSING_BRACKETS[char]
+        elif char in self.BRACKETS:
+            search_forward = True
+            target = self.BRACKETS[char]
+        elif char in self.CLOSING_BRACKETS:
+            search_forward = False
+            target = self.CLOSING_BRACKETS[char]
+        else:
+            return None
+        
+        depth = 1
+        if search_forward:
+            for i in range(pos + 1, len(text)):
+                if text[i] == char:
+                    depth += 1
+                elif text[i] == target:
+                    depth -= 1
+                    if depth == 0:
+                        return i
+        else:
+            for i in range(pos - 1, -1, -1):
+                if text[i] == char:
+                    depth += 1
+                elif text[i] == target:
+                    depth -= 1
+                    if depth == 0:
+                        return i
+        
+        return None
+    
+    def highlight_matching_brackets(self, cursor, extra_selections: list, dark_mode: bool):
+        """Add bracket highlighting to extra selections."""
+        match_pos = self.find_matching_bracket(cursor)
+        if match_pos is None:
+            return
+        
+        if dark_mode:
+            bracket_color = QColor("#4a4a00")
+        else:
+            bracket_color = QColor("#c0ffc0")
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        current_pos = None
+        if pos > 0 and (text[pos - 1] in self.BRACKETS or text[pos - 1] in self.CLOSING_BRACKETS):
+            current_pos = pos - 1
+        elif pos < len(text) and (text[pos] in self.BRACKETS or text[pos] in self.CLOSING_BRACKETS):
+            current_pos = pos
+        
+        if current_pos is not None:
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(bracket_color)
+            c = self.editor.textCursor()
+            c.setPosition(current_pos)
+            c.setPosition(current_pos + 1, c.MoveMode.KeepAnchor)
+            selection.cursor = c
+            extra_selections.append(selection)
+        
+        selection = QTextEdit.ExtraSelection()
+        selection.format.setBackground(bracket_color)
+        c = self.editor.textCursor()
+        c.setPosition(match_pos)
+        c.setPosition(match_pos + 1, c.MoveMode.KeepAnchor)
+        selection.cursor = c
+        extra_selections.append(selection)
+    
+    def should_auto_close(self, char: str, cursor) -> bool:
+        """Check if we should auto-insert the closing bracket."""
+        if char not in self.BRACKETS:
+            return False
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos < len(text):
+            next_char = text[pos]
+            if next_char.isalnum():
+                return False
+        
+        return True
+    
+    def should_skip_closing(self, char: str, cursor) -> bool:
+        """Check if we should skip over an existing closing bracket."""
+        if char not in self.CLOSING_BRACKETS:
+            return False
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos < len(text) and text[pos] == char:
+            return True
+        
+        return False
+    
+    def should_delete_pair(self, cursor) -> bool:
+        """Check if backspace should delete a bracket pair."""
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos > 0 and pos < len(text):
+            prev_char = text[pos - 1]
+            next_char = text[pos]
+            if prev_char in self.BRACKETS and self.BRACKETS[prev_char] == next_char:
+                return True
+        
+        return False
+
+
+class QuoteMatchManager:
+    """Manages quote matching and auto-closing."""
+    
+    QUOTES = ['"', "'", '`']
+    
+    def __init__(self, editor):
+        self.editor = editor
+    
+    def is_quote(self, char: str) -> bool:
+        return char in self.QUOTES
+    
+    def is_inside_quotes(self, cursor, quote_char: str) -> bool:
+        """Check if cursor is inside a quoted string."""
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        line_start = text.rfind('\n', 0, pos)
+        line_start = 0 if line_start == -1 else line_start + 1
+        
+        line_text = text[line_start:pos]
+        count = line_text.count(quote_char)
+        
+        return count % 2 == 1
+    
+    def should_auto_close(self, char: str, cursor) -> bool:
+        """Check if we should auto-insert the closing quote."""
+        if char not in self.QUOTES:
+            return False
+        
+        if self.is_inside_quotes(cursor, char):
+            return False
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos < len(text):
+            next_char = text[pos]
+            if next_char.isalnum():
+                return False
+        
+        if pos > 0:
+            prev_char = text[pos - 1]
+            if prev_char.isalnum() or prev_char == '\\':
+                return False
+        
+        return True
+    
+    def should_skip_closing(self, char: str, cursor) -> bool:
+        """Check if we should skip over an existing closing quote."""
+        if char not in self.QUOTES:
+            return False
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos < len(text) and text[pos] == char:
+            if self.is_inside_quotes(cursor, char):
+                return True
+        
+        return False
+    
+    def should_delete_pair(self, cursor) -> bool:
+        """Check if backspace should delete a quote pair."""
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos > 0 and pos < len(text):
+            prev_char = text[pos - 1]
+            next_char = text[pos]
+            if prev_char in self.QUOTES and prev_char == next_char:
+                return True
+        
+        return False
+    
+    def wrap_selection(self, cursor, quote_char: str) -> bool:
+        """Wrap selected text with quotes."""
+        if not cursor.hasSelection():
+            return False
+        
+        selected = cursor.selectedText()
+        cursor.insertText(f"{quote_char}{selected}{quote_char}")
+        return True
+    
+    def find_matching_quote(self, cursor) -> Optional[int]:
+        """Find the position of the matching quote."""
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        if pos >= len(text) and pos == 0:
+            return None
+        
+        # Check character before cursor or at cursor
+        quote_char = None
+        check_pos = None
+        
+        if pos > 0 and text[pos - 1] in self.QUOTES:
+            quote_char = text[pos - 1]
+            check_pos = pos - 1
+        elif pos < len(text) and text[pos] in self.QUOTES:
+            quote_char = text[pos]
+            check_pos = pos
+        
+        if quote_char is None:
+            return None
+        
+        # Find line boundaries
+        line_start = text.rfind('\n', 0, check_pos)
+        line_start = 0 if line_start == -1 else line_start + 1
+        line_end = text.find('\n', check_pos)
+        line_end = len(text) if line_end == -1 else line_end
+        
+        line_text = text[line_start:line_end]
+        pos_in_line = check_pos - line_start
+        
+        # Count quotes before this position to determine if opening or closing
+        quotes_before = line_text[:pos_in_line].count(quote_char)
+        
+        if quotes_before % 2 == 0:
+            # This is an opening quote, find closing
+            for i in range(check_pos + 1, line_end):
+                if text[i] == quote_char and (i == 0 or text[i - 1] != '\\'):
+                    return i
+        else:
+            # This is a closing quote, find opening
+            for i in range(check_pos - 1, line_start - 1, -1):
+                if text[i] == quote_char and (i == 0 or text[i - 1] != '\\'):
+                    return i
+        
+        return None
+    
+    def highlight_matching_quotes(self, cursor, extra_selections: list, dark_mode: bool):
+        """Add quote highlighting to extra selections."""
+        match_pos = self.find_matching_quote(cursor)
+        if match_pos is None:
+            return
+        
+        if dark_mode:
+            quote_color = QColor("#4a004a")  # Purple tint for dark mode
+        else:
+            quote_color = QColor("#ffc0ff")  # Light purple for light mode
+        
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        
+        # Find current quote position
+        current_pos = None
+        if pos > 0 and text[pos - 1] in self.QUOTES:
+            current_pos = pos - 1
+        elif pos < len(text) and text[pos] in self.QUOTES:
+            current_pos = pos
+        
+        if current_pos is not None:
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(quote_color)
+            c = self.editor.textCursor()
+            c.setPosition(current_pos)
+            c.setPosition(current_pos + 1, c.MoveMode.KeepAnchor)
+            selection.cursor = c
+            extra_selections.append(selection)
+        
+        # Highlight matching quote
+        selection = QTextEdit.ExtraSelection()
+        selection.format.setBackground(quote_color)
+        c = self.editor.textCursor()
+        c.setPosition(match_pos)
+        c.setPosition(match_pos + 1, c.MoveMode.KeepAnchor)
+        selection.cursor = c
+        extra_selections.append(selection)
+
+
 class LineNumberArea(QWidget):
     """Widget for displaying line numbers."""
     
@@ -197,6 +572,11 @@ class TextEditor(QPlainTextEdit):
         
         # Create line number area
         self.line_number_area = LineNumberArea(self)
+        
+        # Initialize managers
+        self.indent_manager = AutoIndentManager(self, tab_width)
+        self.bracket_manager = BracketMatchManager(self)
+        self.quote_manager = QuoteMatchManager(self)
         
         # Connect signals for line number updates
         self.blockCountChanged.connect(self.update_line_number_area_width)
@@ -279,7 +659,7 @@ class TextEditor(QPlainTextEdit):
             block_number += 1
     
     def highlight_current_line(self):
-        """Highlight the current line."""
+        """Highlight the current line and matching brackets."""
         extra_selections = []
         
         if not self.isReadOnly():
@@ -295,6 +675,16 @@ class TextEditor(QPlainTextEdit):
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
             extra_selections.append(selection)
+        
+        # Add bracket matching highlights
+        self.bracket_manager.highlight_matching_brackets(
+            self.textCursor(), extra_selections, self.dark_mode
+        )
+        
+        # Add quote matching highlights
+        self.quote_manager.highlight_matching_quotes(
+            self.textCursor(), extra_selections, self.dark_mode
+        )
         
         self.setExtraSelections(extra_selections)
     
@@ -324,25 +714,145 @@ class TextEditor(QPlainTextEdit):
     
     def keyPressEvent(self, event):
         """Handle custom key press events."""
-        if event.key() == Qt.Key.Key_Tab:
+        cursor = self.textCursor()
+        key = event.key()
+        text = event.text()
+        
+        # Handle Tab
+        if key == Qt.Key.Key_Tab:
             self.insertPlainText(" " * self.tab_width)
-        elif event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            return
+        
+        # Handle Enter/Return with auto-indent
+        if key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
             if self.auto_indent:
                 self._handle_auto_indent()
             else:
                 super().keyPressEvent(event)
-        else:
+            return
+        
+        # Handle Backspace - delete pairs and smart indent
+        if key == Qt.Key.Key_Backspace:
+            if self.bracket_manager.should_delete_pair(cursor):
+                cursor.deleteChar()  # Delete the closing bracket
+                super().keyPressEvent(event)  # Delete the opening bracket
+                return
+            if self.quote_manager.should_delete_pair(cursor):
+                cursor.deleteChar()  # Delete the closing quote
+                super().keyPressEvent(event)  # Delete the opening quote
+                return
+            
+            # Smart backspace: delete tab_width spaces at a time on indented lines
+            block = cursor.block()
+            text_before = block.text()[:cursor.positionInBlock()]
+            
+            if text_before and text_before.strip() == '':
+                # We're in leading whitespace
+                indent = len(text_before)
+                if indent > 0:
+                    # Calculate how many spaces to delete (back to previous tab stop)
+                    spaces_to_delete = indent % self.tab_width
+                    if spaces_to_delete == 0:
+                        spaces_to_delete = self.tab_width
+                    spaces_to_delete = min(spaces_to_delete, indent)
+                    
+                    for _ in range(spaces_to_delete):
+                        cursor.deletePreviousChar()
+                    return
+            
             super().keyPressEvent(event)
+            return
+        
+        # Handle character input
+        if text and len(text) == 1:
+            char = text
+            
+            # Handle quotes with selection wrapping
+            if self.quote_manager.is_quote(char) and cursor.hasSelection():
+                self.quote_manager.wrap_selection(cursor, char)
+                return
+            
+            # Skip over closing brackets
+            if self.bracket_manager.should_skip_closing(char, cursor):
+                cursor.movePosition(cursor.MoveOperation.Right)
+                self.setTextCursor(cursor)
+                return
+            
+            # Skip over closing quotes
+            if self.quote_manager.should_skip_closing(char, cursor):
+                cursor.movePosition(cursor.MoveOperation.Right)
+                self.setTextCursor(cursor)
+                return
+            
+            # Auto-close brackets
+            if self.bracket_manager.should_auto_close(char, cursor):
+                closing = self.bracket_manager.get_matching_bracket(char)
+                # Handle auto-dedent for closing brackets
+                if self.indent_manager.should_decrease_indent(char, cursor):
+                    new_indent = self.indent_manager.get_decreased_indent(cursor)
+                    cursor.select(cursor.SelectionType.LineUnderCursor)
+                    line_text = cursor.selectedText()
+                    cursor.insertText(' ' * new_indent + line_text.lstrip())
+                    cursor = self.textCursor()
+                cursor.insertText(char + closing)
+                cursor.movePosition(cursor.MoveOperation.Left)
+                self.setTextCursor(cursor)
+                return
+            
+            # Auto-close quotes
+            if self.quote_manager.should_auto_close(char, cursor):
+                cursor.insertText(char + char)
+                cursor.movePosition(cursor.MoveOperation.Left)
+                self.setTextCursor(cursor)
+                return
+            
+            # Handle auto-dedent for closing brackets (without auto-close)
+            if self.indent_manager.should_decrease_indent(char, cursor):
+                new_indent = self.indent_manager.get_decreased_indent(cursor)
+                cursor.select(cursor.SelectionType.LineUnderCursor)
+                line_text = cursor.selectedText()
+                cursor.insertText(' ' * new_indent + char)
+                return
+        
+        super().keyPressEvent(event)
     
     def _handle_auto_indent(self):
         """Handle auto-indentation on new line."""
         cursor = self.textCursor()
-        block = cursor.block()
-        text = block.text()
+        text = self.toPlainText()
+        pos = cursor.position()
         
-        indent = len(text) - len(text.lstrip())
+        # Check if we're between matching brackets
+        if pos > 0 and pos < len(text):
+            char_before = text[pos - 1]
+            char_after = text[pos]
+            
+            if char_before in self.bracket_manager.BRACKETS:
+                expected_closing = self.bracket_manager.BRACKETS[char_before]
+                if char_after == expected_closing:
+                    # We're between brackets like {|} or (|)
+                    # Get the indent of the line with the opening bracket
+                    block = cursor.block()
+                    line_text = block.text()
+                    base_indent = len(line_text) - len(line_text.lstrip())
+                    
+                    # Round down to nearest tab stop for closing bracket
+                    closing_indent = (base_indent // self.tab_width) * self.tab_width
+                    
+                    # Content gets one more level of indentation
+                    content_indent = closing_indent + self.tab_width
+                    
+                    # Insert: newline + content indent + newline + closing indent
+                    cursor.insertText("\n" + " " * content_indent + "\n" + " " * closing_indent)
+                    # Move cursor back to the content line
+                    cursor.movePosition(cursor.MoveOperation.Up)
+                    cursor.movePosition(cursor.MoveOperation.EndOfLine)
+                    self.setTextCursor(cursor)
+                    return
         
-        cursor.insertText("\n" + " " * indent)
+        # Normal auto-indent
+        indent = self.indent_manager.calculate_indent(cursor)
+        cursor.insertText("\n" + indent)
         self.setTextCursor(cursor)
 
 
@@ -1344,17 +1854,76 @@ class StatusBarManager:
 # ============================================================================
 
 class FindReplaceDialog(QDialog):
-    """Dialog for find/replace operations."""
+    """Dialog for find/replace operations across all open files."""
     
-    def __init__(self, parent: QMainWindow):
+    def __init__(self, parent: QMainWindow, find_only: bool = False):
         super().__init__(parent)
         self.main_window = parent
-        self.setWindowTitle("Find & Replace")
+        self.find_only = find_only
+        self.dark_mode = getattr(parent, 'dark_mode', False)
+        if find_only:
+            self.setWindowTitle("Find (All Files)")
+        else:
+            self.setWindowTitle("Find & Replace (All Files)")
         self.setup_ui()
+        self._apply_theme()
+    
+    def get_all_editors(self) -> list:
+        """Get all open editors from all tab widgets."""
+        editors = []
+        for tw in self.main_window.editor_pane.tab_widgets:
+            for tab in tw.tabs:
+                editors.append((tab, tab.editor))
+        return editors
     
     def get_current_editor(self) -> Optional[TextEditor]:
         """Get the current text editor from the editor pane."""
         return self.main_window.editor_pane.current_editor()
+    
+    def closeEvent(self, event):
+        """Clear highlights when dialog is closed."""
+        self._clear_all_highlights()
+        super().closeEvent(event)
+    
+    def _clear_all_highlights(self):
+        """Remove all search highlights from all editors."""
+        for tab, editor in self.get_all_editors():
+            editor.highlight_current_line()
+    
+    def _highlight_matches_in_editor(self, editor: TextEditor, matches: list):
+        """Highlight matches in a specific editor."""
+        extra_selections = []
+        
+        # Keep current line highlight only for focused editor
+        current_editor = self.get_current_editor()
+        if editor == current_editor and not editor.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            if editor.dark_mode:
+                line_color = QColor("#3d3d3d")
+            else:
+                line_color = QColor("#e6f3ff")
+            selection.format.setBackground(line_color)
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = editor.textCursor()
+            selection.cursor.clearSelection()
+            extra_selections.append(selection)
+        
+        # Add match highlights
+        if editor.dark_mode:
+            highlight_color = QColor("#806000")
+        else:
+            highlight_color = QColor("#ffff00")
+        
+        for start, end in matches:
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(highlight_color)
+            cursor = editor.textCursor()
+            cursor.setPosition(start)
+            cursor.setPosition(end, cursor.MoveMode.KeepAnchor)
+            selection.cursor = cursor
+            extra_selections.append(selection)
+        
+        editor.setExtraSelections(extra_selections)
     
     def setup_ui(self):
         """Setup dialog UI."""
@@ -1364,20 +1933,31 @@ class FindReplaceDialog(QDialog):
         find_layout = QHBoxLayout()
         find_layout.addWidget(QLabel("Find:"))
         self.find_input = QLineEdit()
+        self.find_input.textChanged.connect(self.find_all)  # Live search as you type
         find_layout.addWidget(self.find_input)
         layout.addLayout(find_layout)
         
         # Replace section
-        replace_layout = QHBoxLayout()
+        self.replace_widget = QWidget()
+        replace_layout = QHBoxLayout(self.replace_widget)
+        replace_layout.setContentsMargins(0, 0, 0, 0)
         replace_layout.addWidget(QLabel("Replace:"))
         self.replace_input = QLineEdit()
         replace_layout.addWidget(self.replace_input)
-        layout.addLayout(replace_layout)
+        layout.addWidget(self.replace_widget)
+        
+        if self.find_only:
+            self.replace_widget.setVisible(False)
         
         # Options
         self.case_sensitive = QCheckBox("Case Sensitive")
         self.whole_word = QCheckBox("Whole Word")
         self.regex = QCheckBox("Regular Expression")
+        
+        # Re-run search when options change
+        self.case_sensitive.stateChanged.connect(self.find_all)
+        self.whole_word.stateChanged.connect(self.find_all)
+        self.regex.stateChanged.connect(self.find_all)
         
         layout.addWidget(self.case_sensitive)
         layout.addWidget(self.whole_word)
@@ -1387,35 +1967,69 @@ class FindReplaceDialog(QDialog):
         button_layout = QHBoxLayout()
         find_button = QPushButton("Find All")
         find_button.clicked.connect(self.find_all)
-        replace_button = QPushButton("Replace All")
-        replace_button.clicked.connect(self.replace_all)
+        
+        self.replace_button = QPushButton("Replace All")
+        self.replace_button.clicked.connect(self.replace_all)
+        
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
         
         button_layout.addWidget(find_button)
-        button_layout.addWidget(replace_button)
+        button_layout.addWidget(self.replace_button)
         button_layout.addWidget(close_button)
         layout.addLayout(button_layout)
+        
+        if self.find_only:
+            self.replace_button.setVisible(False)
         
         self.setLayout(layout)
         self.setMinimumWidth(400)
     
+    def _apply_theme(self):
+        """Apply dark or light theme to the dialog."""
+        if self.dark_mode:
+            self.setStyleSheet("""
+                QDialog { background-color: #2d2d2d; color: #d4d4d4; }
+                QLabel { color: #d4d4d4; }
+                QLineEdit { 
+                    background-color: #1e1e1e; 
+                    color: #d4d4d4; 
+                    border: 1px solid #3d3d3d; 
+                    padding: 5px; 
+                }
+                QCheckBox { color: #d4d4d4; }
+                QCheckBox::indicator { 
+                    border: 1px solid #555555; 
+                    background-color: #2d2d2d; 
+                }
+                QCheckBox::indicator:checked { 
+                    background-color: #0078d4; 
+                }
+                QPushButton { 
+                    background-color: #3d3d3d; 
+                    color: #d4d4d4; 
+                    border: 1px solid #555555; 
+                    padding: 6px 12px; 
+                }
+                QPushButton:hover { background-color: #4d4d4d; }
+            """)
+        else:
+            self.setStyleSheet("")
+    
     def find_all(self):
-        """Find all occurrences."""
-        editor = self.get_current_editor()
-        if not editor:
-            return
-        
+        """Find all occurrences across all open files and highlight them."""
         pattern = self.find_input.text()
         if not pattern:
+            self._clear_all_highlights()
+            self.setWindowTitle("Find & Replace (All Files)")
             return
         
         case_sensitive = self.case_sensitive.isChecked()
         whole_word = self.whole_word.isChecked()
         use_regex = self.regex.isChecked()
         
-        text = editor.toPlainText()
-        results = []
+        total_matches = 0
+        files_with_matches = 0
         
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
@@ -1428,34 +2042,48 @@ class FindReplaceDialog(QDialog):
                     escaped = r'\b' + escaped + r'\b'
                 regex = re.compile(escaped, flags)
             
-            for match in regex.finditer(text):
-                results.append(match.span())
+            for tab, editor in self.get_all_editors():
+                text = editor.toPlainText()
+                results = []
+                
+                for match in regex.finditer(text):
+                    results.append(match.span())
+                
+                if results:
+                    files_with_matches += 1
+                    total_matches += len(results)
+                
+                self._highlight_matches_in_editor(editor, results)
+                
         except re.error:
             pass
         
-        QMessageBox.information(
-            self, "Search Results",
-            f"Found {len(results)} occurrence(s)."
-        )
+        self.setWindowTitle(f"Find & Replace - {total_matches} match(es) in {files_with_matches} file(s)")
     
     def replace_all(self):
-        """Replace all occurrences."""
-        editor = self.get_current_editor()
-        if not editor:
-            return
-        
+        """Replace all occurrences across all open files."""
         pattern = self.find_input.text()
         replacement = self.replace_input.text()
         
         if not pattern:
             return
         
+        # Warn if replacement text is empty
+        if not replacement:
+            reply = QMessageBox.warning(
+                self, "Empty Replacement",
+                "The replacement text is empty. This will delete all matches.\n\nDo you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+        
         case_sensitive = self.case_sensitive.isChecked()
         whole_word = self.whole_word.isChecked()
         use_regex = self.regex.isChecked()
         
-        text = editor.toPlainText()
-        count = 0
+        total_count = 0
+        files_modified = 0
         
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
@@ -1468,16 +2096,21 @@ class FindReplaceDialog(QDialog):
                     escaped = r'\b' + escaped + r'\b'
                 regex = re.compile(escaped, flags)
             
-            new_text, count = regex.subn(replacement, text)
-            if count > 0:
-                editor.setPlainText(new_text)
+            for tab, editor in self.get_all_editors():
+                text = editor.toPlainText()
+                new_text, count = regex.subn(replacement, text)
+                if count > 0:
+                    editor.setPlainText(new_text)
+                    tab.is_modified = True
+                    total_count += count
+                    files_modified += 1
+                    
         except re.error:
             pass
         
-        QMessageBox.information(
-            self, "Replace Results",
-            f"Replaced {count} occurrence(s)."
-        )
+        # Clear highlights and show result
+        self._clear_all_highlights()
+        self.setWindowTitle(f"Find & Replace - Replaced {total_count} in {files_modified} file(s)")
 
 
 class SearchEngine:
@@ -1547,6 +2180,7 @@ class MainWindow(QMainWindow):
         # Initialize managers and components
         self.settings_manager = SettingsManager()
         self.file_manager = FileManager()
+        self.dark_mode = False
         
         # Create editor pane (with tabs and split support)
         self.editor_pane = EditorPane(self.settings_manager)
@@ -1702,6 +2336,7 @@ class MainWindow(QMainWindow):
     
     def _apply_window_theme(self, dark_mode: bool):
         """Apply theme to window elements."""
+        self.dark_mode = dark_mode
         self.menu_tab_bar.apply_theme(dark_mode)
         self.file_explorer.apply_theme(dark_mode)
         if dark_mode:
@@ -1712,6 +2347,15 @@ class MainWindow(QMainWindow):
                 QMenu { background-color: #2d2d2d; color: #d4d4d4; }
                 QMenu::item:selected { background-color: #3d3d3d; }
                 QStatusBar { background-color: #2d2d2d; color: #d4d4d4; }
+                QDialog { background-color: #2d2d2d; color: #d4d4d4; }
+                QMessageBox { background-color: #2d2d2d; color: #d4d4d4; }
+                QInputDialog { background-color: #2d2d2d; color: #d4d4d4; }
+                QLabel { color: #d4d4d4; }
+                QLineEdit { background-color: #1e1e1e; color: #d4d4d4; border: 1px solid #3d3d3d; padding: 5px; }
+                QCheckBox { color: #d4d4d4; }
+                QPushButton { background-color: #3d3d3d; color: #d4d4d4; border: 1px solid #555555; padding: 6px 12px; }
+                QPushButton:hover { background-color: #4d4d4d; }
+                QFileDialog { background-color: #2d2d2d; color: #d4d4d4; }
             """)
         else:
             self.setStyleSheet("")
@@ -1763,9 +2407,8 @@ class MainWindow(QMainWindow):
             self._update_title()
     
     def show_find_dialog(self):
-        """Show find dialog."""
-        dialog = FindReplaceDialog(self)
-        dialog.replace_input.setVisible(False)
+        """Show find dialog (find only, no replace)."""
+        dialog = FindReplaceDialog(self, find_only=True)
         dialog.exec()
     
     def show_find_replace_dialog(self):
