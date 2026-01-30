@@ -539,6 +539,275 @@ class QuoteMatchManager:
         extra_selections.append(selection)
 
 
+class MultiCursorManager:
+    """Manages multiple cursors for simultaneous editing."""
+    
+    def __init__(self, editor):
+        self.editor = editor
+        self.cursors: list[QTextCursor] = []
+        self.active = False
+    
+    def add_cursor(self, cursor: QTextCursor):
+        """Add a new cursor at the specified position."""
+        # Avoid duplicate cursors at same position
+        for existing in self.cursors:
+            if existing.position() == cursor.position():
+                return
+        
+        new_cursor = QTextCursor(cursor)
+        self.cursors.append(new_cursor)
+        self.active = True
+    
+    def clear(self):
+        """Clear all extra cursors."""
+        self.cursors.clear()
+        self.active = False
+    
+    def has_cursors(self) -> bool:
+        """Check if there are multiple cursors."""
+        return self.active and len(self.cursors) > 0
+    
+    def get_all_cursors(self) -> list[QTextCursor]:
+        """Get all cursors including the main one."""
+        main_cursor = self.editor.textCursor()
+        if not self.active:
+            return [main_cursor]
+        return [main_cursor] + self.cursors
+    
+    def insert_text(self, text: str):
+        """Insert text at all cursor positions."""
+        if not self.active:
+            return False
+        
+        # Sort cursors by position (descending) to avoid position shifts
+        all_cursors = self.get_all_cursors()
+        all_cursors.sort(key=lambda c: c.position(), reverse=True)
+        
+        # Begin edit block for undo grouping
+        main_cursor = self.editor.textCursor()
+        main_cursor.beginEditBlock()
+        
+        for cursor in all_cursors:
+            cursor.insertText(text)
+        
+        main_cursor.endEditBlock()
+        self._update_cursor_positions_after_edit()
+        return True
+    
+    def delete_char(self, backwards: bool = True):
+        """Delete character at all cursor positions."""
+        if not self.active:
+            return False
+        
+        all_cursors = self.get_all_cursors()
+        all_cursors.sort(key=lambda c: c.position(), reverse=True)
+        
+        main_cursor = self.editor.textCursor()
+        main_cursor.beginEditBlock()
+        
+        for cursor in all_cursors:
+            if backwards:
+                cursor.deletePreviousChar()
+            else:
+                cursor.deleteChar()
+        
+        main_cursor.endEditBlock()
+        self._update_cursor_positions_after_edit()
+        return True
+    
+    def move_cursors(self, operation, mode=QTextCursor.MoveMode.MoveAnchor):
+        """Move all cursors with the given operation."""
+        if not self.active:
+            return False
+        
+        for cursor in self.cursors:
+            cursor.movePosition(operation, mode)
+        return True
+    
+    def _update_cursor_positions_after_edit(self):
+        """Update cursor list after edits - remove invalid/duplicate cursors."""
+        seen_positions = {self.editor.textCursor().position()}
+        valid_cursors = []
+        
+        for cursor in self.cursors:
+            pos = cursor.position()
+            if pos not in seen_positions:
+                seen_positions.add(pos)
+                valid_cursors.append(cursor)
+        
+        self.cursors = valid_cursors
+        if not self.cursors:
+            self.active = False
+    
+    def add_cursor_above(self):
+        """Add a cursor on the line above each current cursor."""
+        all_cursors = self.get_all_cursors()
+        new_cursors = []
+        
+        for cursor in all_cursors:
+            new_cursor = QTextCursor(cursor)
+            if new_cursor.movePosition(QTextCursor.MoveOperation.Up):
+                new_cursors.append(new_cursor)
+        
+        for c in new_cursors:
+            self.add_cursor(c)
+    
+    def add_cursor_below(self):
+        """Add a cursor on the line below each current cursor."""
+        all_cursors = self.get_all_cursors()
+        new_cursors = []
+        
+        for cursor in all_cursors:
+            new_cursor = QTextCursor(cursor)
+            if new_cursor.movePosition(QTextCursor.MoveOperation.Down):
+                new_cursors.append(new_cursor)
+        
+        for c in new_cursors:
+            self.add_cursor(c)
+    
+    def highlight_cursors(self, extra_selections: list, dark_mode: bool):
+        """Add visual highlights for extra cursors."""
+        if not self.active:
+            return
+        
+        cursor_color = QColor("#ff6b6b") if dark_mode else QColor("#ff4444")
+        
+        for cursor in self.cursors:
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(cursor_color)
+            c = QTextCursor(cursor)
+            # Highlight a thin line at cursor position
+            if c.position() < len(self.editor.toPlainText()):
+                c.setPosition(c.position())
+                c.setPosition(c.position() + 1, QTextCursor.MoveMode.KeepAnchor)
+            selection.cursor = c
+            extra_selections.append(selection)
+
+
+class RectangularSelectionManager:
+    """Manages rectangular/column selection."""
+    
+    def __init__(self, editor):
+        self.editor = editor
+        self.active = False
+        self.start_pos = None  # (line, column)
+        self.end_pos = None    # (line, column)
+    
+    def start_selection(self, line: int, column: int):
+        """Start a rectangular selection."""
+        self.active = True
+        self.start_pos = (line, column)
+        self.end_pos = (line, column)
+    
+    def update_selection(self, line: int, column: int):
+        """Update the end position of rectangular selection."""
+        if self.active:
+            self.end_pos = (line, column)
+    
+    def clear(self):
+        """Clear the rectangular selection."""
+        self.active = False
+        self.start_pos = None
+        self.end_pos = None
+    
+    def get_selection_range(self) -> tuple:
+        """Get the normalized selection range."""
+        if not self.active or not self.start_pos or not self.end_pos:
+            return None
+        
+        start_line = min(self.start_pos[0], self.end_pos[0])
+        end_line = max(self.start_pos[0], self.end_pos[0])
+        start_col = min(self.start_pos[1], self.end_pos[1])
+        end_col = max(self.start_pos[1], self.end_pos[1])
+        
+        return (start_line, end_line, start_col, end_col)
+    
+    def get_selected_text(self) -> list[str]:
+        """Get the text from each line in the rectangular selection."""
+        range_info = self.get_selection_range()
+        if not range_info:
+            return []
+        
+        start_line, end_line, start_col, end_col = range_info
+        text = self.editor.toPlainText()
+        lines = text.split('\n')
+        
+        selected = []
+        for i in range(start_line, end_line + 1):
+            if i < len(lines):
+                line = lines[i]
+                # Pad line if it's shorter than start_col
+                if len(line) < start_col:
+                    selected.append('')
+                else:
+                    selected.append(line[start_col:end_col])
+        
+        return selected
+    
+    def highlight_selection(self, extra_selections: list, dark_mode: bool):
+        """Add visual highlights for rectangular selection."""
+        if not self.active:
+            return
+        
+        range_info = self.get_selection_range()
+        if not range_info:
+            return
+        
+        start_line, end_line, start_col, end_col = range_info
+        rect_color = QColor("#264f78") if dark_mode else QColor("#add6ff")
+        
+        doc = self.editor.document()
+        
+        for line_num in range(start_line, end_line + 1):
+            block = doc.findBlockByLineNumber(line_num)
+            if not block.isValid():
+                continue
+            
+            line_text = block.text()
+            actual_start = min(start_col, len(line_text))
+            actual_end = min(end_col, len(line_text))
+            
+            if actual_start < actual_end:
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setBackground(rect_color)
+                
+                cursor = QTextCursor(block)
+                cursor.setPosition(block.position() + actual_start)
+                cursor.setPosition(block.position() + actual_end, QTextCursor.MoveMode.KeepAnchor)
+                selection.cursor = cursor
+                extra_selections.append(selection)
+    
+    def create_cursors_from_selection(self, multi_cursor_mgr: 'MultiCursorManager'):
+        """Convert rectangular selection to multiple cursors."""
+        range_info = self.get_selection_range()
+        if not range_info:
+            return
+        
+        start_line, end_line, start_col, end_col = range_info
+        doc = self.editor.document()
+        
+        # Use the end column for cursor placement
+        col = end_col
+        
+        for line_num in range(start_line, end_line + 1):
+            block = doc.findBlockByLineNumber(line_num)
+            if not block.isValid():
+                continue
+            
+            cursor = QTextCursor(block)
+            line_length = len(block.text())
+            target_col = min(col, line_length)
+            cursor.setPosition(block.position() + target_col)
+            
+            if line_num == start_line:
+                # Set as main cursor
+                self.editor.setTextCursor(cursor)
+            else:
+                multi_cursor_mgr.add_cursor(cursor)
+        
+        self.clear()
+
+
 class LineNumberArea(QWidget):
     """Widget for displaying line numbers."""
     
@@ -577,6 +846,8 @@ class TextEditor(QPlainTextEdit):
         self.indent_manager = AutoIndentManager(self, tab_width)
         self.bracket_manager = BracketMatchManager(self)
         self.quote_manager = QuoteMatchManager(self)
+        self.multi_cursor_manager = MultiCursorManager(self)
+        self.rect_selection_manager = RectangularSelectionManager(self)
         
         # Connect signals for line number updates
         self.blockCountChanged.connect(self.update_line_number_area_width)
@@ -686,6 +957,12 @@ class TextEditor(QPlainTextEdit):
             self.textCursor(), extra_selections, self.dark_mode
         )
         
+        # Add multi-cursor highlights
+        self.multi_cursor_manager.highlight_cursors(extra_selections, self.dark_mode)
+        
+        # Add rectangular selection highlights
+        self.rect_selection_manager.highlight_selection(extra_selections, self.dark_mode)
+        
         self.setExtraSelections(extra_selections)
     
     def set_dark_mode(self, enabled: bool):
@@ -717,15 +994,72 @@ class TextEditor(QPlainTextEdit):
         cursor = self.textCursor()
         key = event.key()
         text = event.text()
+        modifiers = event.modifiers()
+        
+        # Handle Escape - clear multi-cursor and rectangular selection
+        if key == Qt.Key.Key_Escape:
+            if self.multi_cursor_manager.has_cursors() or self.rect_selection_manager.active:
+                self.multi_cursor_manager.clear()
+                self.rect_selection_manager.clear()
+                self.highlight_current_line()
+                return
+        
+        # Handle Ctrl+Alt+Up - add cursor above
+        if key == Qt.Key.Key_Up and modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier):
+            self.multi_cursor_manager.add_cursor_above()
+            self.highlight_current_line()
+            return
+        
+        # Handle Ctrl+Alt+Down - add cursor below
+        if key == Qt.Key.Key_Down and modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier):
+            self.multi_cursor_manager.add_cursor_below()
+            self.highlight_current_line()
+            return
+        
+        # Convert rectangular selection to cursors when user starts typing
+        if self.rect_selection_manager.active:
+            if text and len(text) == 1:
+                self.rect_selection_manager.create_cursors_from_selection(self.multi_cursor_manager)
+                self.highlight_current_line()
+                # Fall through to handle the typed character with multi-cursors
+        
+        # Handle multi-cursor text input
+        if self.multi_cursor_manager.has_cursors():
+            if key == Qt.Key.Key_Backspace:
+                # Delete at extra cursors only, let main cursor be handled normally
+                self._multi_cursor_delete(backwards=True)
+                super().keyPressEvent(event)
+                self.highlight_current_line()
+                return
+            
+            if key == Qt.Key.Key_Delete:
+                self._multi_cursor_delete(backwards=False)
+                super().keyPressEvent(event)
+                self.highlight_current_line()
+                return
+            
+            if text and len(text) == 1:
+                # Insert at extra cursors only, main cursor handled by super()
+                self._multi_cursor_insert(text)
+                super().keyPressEvent(event)
+                self.highlight_current_line()
+                return
         
         # Handle Tab
         if key == Qt.Key.Key_Tab:
-            self.insertPlainText(" " * self.tab_width)
+            if self.multi_cursor_manager.has_cursors():
+                self.multi_cursor_manager.insert_text(" " * self.tab_width)
+                self.highlight_current_line()
+            else:
+                self.insertPlainText(" " * self.tab_width)
             return
         
         # Handle Enter/Return with auto-indent
         if key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
-            if self.auto_indent:
+            if self.multi_cursor_manager.has_cursors():
+                self.multi_cursor_manager.insert_text("\n")
+                self.highlight_current_line()
+            elif self.auto_indent:
                 self._handle_auto_indent()
             else:
                 super().keyPressEvent(event)
@@ -854,6 +1188,93 @@ class TextEditor(QPlainTextEdit):
         indent = self.indent_manager.calculate_indent(cursor)
         cursor.insertText("\n" + indent)
         self.setTextCursor(cursor)
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press for multi-cursor and rectangular selection."""
+        modifiers = event.modifiers()
+        
+        # Alt+Shift+Click: Start rectangular selection (check first, before Alt+Click)
+        if event.button() == Qt.MouseButton.LeftButton and (modifiers & Qt.KeyboardModifier.AltModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier):
+            # Clear any existing multi-cursors when starting rect selection
+            self.multi_cursor_manager.clear()
+            cursor = self.cursorForPosition(event.pos())
+            block = cursor.block()
+            line = block.blockNumber()
+            column = cursor.positionInBlock()
+            self.rect_selection_manager.start_selection(line, column)
+            self.highlight_current_line()
+            return
+        
+        # Alt+Click: Add cursor at click position (only if not doing rect selection)
+        if event.button() == Qt.MouseButton.LeftButton and modifiers == Qt.KeyboardModifier.AltModifier:
+            cursor = self.cursorForPosition(event.pos())
+            self.multi_cursor_manager.add_cursor(cursor)
+            self.highlight_current_line()
+            return
+        
+        # Clear multi-cursor on regular click (without modifiers)
+        if event.button() == Qt.MouseButton.LeftButton and modifiers == Qt.KeyboardModifier.NoModifier:
+            if self.multi_cursor_manager.has_cursors():
+                self.multi_cursor_manager.clear()
+                self.highlight_current_line()
+            if self.rect_selection_manager.active:
+                self.rect_selection_manager.clear()
+                self.highlight_current_line()
+        
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for rectangular selection."""
+        if self.rect_selection_manager.active:
+            cursor = self.cursorForPosition(event.pos())
+            block = cursor.block()
+            line = block.blockNumber()
+            column = cursor.positionInBlock()
+            self.rect_selection_manager.update_selection(line, column)
+            self.highlight_current_line()
+            return
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release to finalize rectangular selection."""
+        # Keep rectangular selection active - don't convert to cursors yet
+        # Conversion happens when user starts typing
+        super().mouseReleaseEvent(event)
+    
+    def _get_cursor_line_column(self, cursor) -> tuple[int, int]:
+        """Get line and column for a cursor."""
+        block = cursor.block()
+        return (block.blockNumber(), cursor.positionInBlock())
+    
+    def _multi_cursor_insert(self, text: str):
+        """Insert text at extra cursors only (main cursor handled separately)."""
+        if not self.multi_cursor_manager.cursors:
+            return
+        
+        # Sort by position descending to avoid position shifts
+        cursors = sorted(self.multi_cursor_manager.cursors, key=lambda c: c.position(), reverse=True)
+        
+        for cursor in cursors:
+            cursor.insertText(text)
+        
+        self.multi_cursor_manager._update_cursor_positions_after_edit()
+    
+    def _multi_cursor_delete(self, backwards: bool = True):
+        """Delete at extra cursors only (main cursor handled separately)."""
+        if not self.multi_cursor_manager.cursors:
+            return
+        
+        # Sort by position descending to avoid position shifts
+        cursors = sorted(self.multi_cursor_manager.cursors, key=lambda c: c.position(), reverse=True)
+        
+        for cursor in cursors:
+            if backwards:
+                cursor.deletePreviousChar()
+            else:
+                cursor.deleteChar()
+        
+        self.multi_cursor_manager._update_cursor_positions_after_edit()
 
 
 # ============================================================================
