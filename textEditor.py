@@ -134,13 +134,13 @@ class SelectionManager:
     def select_line(self):
         """Select current line."""
         cursor = self.text_edit.textCursor()
-        cursor.select(cursor.LineUnderCursor)
+        cursor.select(QTextCursor.SelectionType.LineUnderCursor)
         self.text_edit.setTextCursor(cursor)
     
     def select_word(self):
         """Select current word."""
         cursor = self.text_edit.textCursor()
-        cursor.select(cursor.WordUnderCursor)
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
         self.text_edit.setTextCursor(cursor)
 
 
@@ -1121,13 +1121,6 @@ class TextEditor(QPlainTextEdit):
             # Auto-close brackets
             if self.bracket_manager.should_auto_close(char, cursor):
                 closing = self.bracket_manager.get_matching_bracket(char)
-                # Handle auto-dedent for closing brackets
-                if self.indent_manager.should_decrease_indent(char, cursor):
-                    new_indent = self.indent_manager.get_decreased_indent(cursor)
-                    cursor.select(cursor.SelectionType.LineUnderCursor)
-                    line_text = cursor.selectedText()
-                    cursor.insertText(' ' * new_indent + line_text.lstrip())
-                    cursor = self.textCursor()
                 cursor.insertText(char + closing)
                 cursor.movePosition(cursor.MoveOperation.Left)
                 self.setTextCursor(cursor)
